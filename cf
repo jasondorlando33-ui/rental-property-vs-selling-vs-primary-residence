@@ -1,0 +1,126 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
+# ---------------------------------------- USER VARIABLES ----------------------------------------
+purchase_price = 250000
+initial_house_value = 275000
+initial_mortgage_balance = 126153.62
+mortgage_payment = 1260       # Principal & Interest Only
+monthly_escrow = 382.50       # Paid Separately
+mortgage_escrow = mortgage_payment + monthly_escrow
+initial_rent = 1690
+
+prop_tax = 0.0252
+appreciation = 0.04
+state_capital_gains = 0.0307
+state_transfer_tax = 0.025
+annual_maintenance_cost = 0.02
+closing_cost = 0.08
+rent_appreciation = 0.028
+income_tax = 0.23
+manager_fee = 0.06
+market_return = 0.10
+vacancy_rate = 0.05 
+lg_capital_gains = 0.15
+# ---------------------------------------- USER VARIABLES ----------------------------------------
+
+df = pd.DataFrame()
+
+def dynamic_compounding(row, contribution_column, full_df):
+    # get current year and data frame of just past years
+    current_time = row['years']
+    years_past_df = full_df.loc[full_df['years'] <= current_time]
+
+    # get 1D panda objects for contributions and time of all relevant columns
+    contribution = years_past_df[contribution_column]
+    time_grown = current_time - years_past_df['years']
+
+    # calculate the growth of all funds in target range and return sum
+    grown_value = (contribution * np.exp(market_return * time_grown))
+    total_grown = grown_value.sum()
+    return total_grown
+
+
+# adding needed base data
+df['years'] = np.arange(0,30+(1/12),1/12)
+df['home value'] = df['years'].apply(lambda row: initial_house_value * np.exp(appreciation * row))
+df['outstanding mortgage'] = df['years'].apply(lambda row: initial_mortgage_balance - mortgage_payment * row * 12 
+                                               if initial_mortgage_balance > mortgage_payment * row * 12 
+                                               else 0)
+df['equity'] = df.apply(lambda df: df['home value'] - df['outstanding mortgage'],axis=1)
+
+# adding columns for cumalative costs and benefits
+df['est maintenance cost'] = df['home value'].apply(lambda row: row * annual_maintenance_cost / 12)
+df['cummalitive maintenance cost'] = df['est maintenance cost'].cumsum()
+df['est tax cost'] = df['home value'].apply(lambda row: row * prop_tax / 12)
+df['cummalitive tax cost'] = df['est tax cost'].cumsum()
+df['est rent'] = df['years'].apply(lambda row: initial_rent * np.exp(rent_appreciation * row))
+df['cummalitive rent collected'] = df['est rent'].cumsum()
+df['rent after cost'] = df.apply(lambda df: df['est rent'] - df['est tax cost'] - df['est maintenance cost'] - df['est rent'] * manager_fee 
+                                 if df['outstanding mortgage'] == 0 
+                                 else df['est rent'] - df['est tax cost'] - df['est maintenance cost'] - df['est rent'] * manager_fee - mortgage_payment, axis=1)
+
+df['net money that could be inv if sold'] = df['rent after cost'].apply(lambda cost: abs(cost) if cost < 0 else 0)
+df['if sold money inv'] = df.apply(dynamic_compounding, axis=1, contribution_column= 'net money that could be inv if sold',full_df=df)
+df['net money that could be inv if rented'] = df['rent after cost'].apply(lambda cost: abs(cost) if cost > 0 else 0)
+df['if rented money inv'] = df.apply(dynamic_compounding, axis=1, contribution_column= 'net money that could be inv if rented',full_df=df)
+
+df['net money that could be inv if rented w/ income tax'] = df['rent after cost'].apply(lambda cost: abs(cost)*(1-income_tax) if cost > 0 else 0)
+df['if rented money w/ income tax inv'] = df.apply(dynamic_compounding, axis=1, contribution_column= 'net money that could be inv if rented w/ income tax',full_df=df)
+
+# ------------------------------ create function for each situation --------------------------------------------------------
+
+def sold_initially_invested(df):
+    initial_capital = initial_house_value - initial_house_value * (state_capital_gains + state_transfer_tax + closing_cost) - initial_mortgage_balance
+    invested_capital_from_sale = initial_capital * np.exp(market_return * df['years'])
+    post_tax_capital = invested_capital_from_sale - (invested_capital_from_sale - initial_capital) * lg_capital_gains
+    inv_oppurtunity_cost_from_renting = df['if sold money inv']
+    post_tax_oppurtunity_cost = df['if sold money inv'] - df['if sold money inv'] * lg_capital_gains
+    return post_tax_capital + post_tax_oppurtunity_cost - df['est rent']            # other residence living in assumed to cost rent
+    
+def value_primary_residence(df):
+    value = df['home value']       # would have to live somewhere not counting not counting cost to live here against this option
+
+    # accounting for capital gains on sale which are waived if you lived there 3 years of past 5
+    if df['years'] > 3:
+        sold_value = value - value * (state_capital_gains + state_transfer_tax + closing_cost + lg_capital_gains) - df['outstanding mortgage']
+    else:
+        sold_value = value - value * (state_capital_gains + state_transfer_tax + closing_cost) - df['outstanding mortgage'] 
+    return sold_value
+
+def rented_out(df, tax=False):
+    # base value, ongoing cost is factored into oppurtunity cost columns
+    value = df['home value']
+
+    # accounting for capital gains on sale which are waived if you lived there 3 years of past 5
+    if df['years'] > 3:
+        sold_value = value - value * (state_capital_gains + state_transfer_tax + closing_cost + lg_capital_gains) - df['outstanding mortgage']
+    else:
+        sold_value = value - value * (state_capital_gains + state_transfer_tax + closing_cost) - df['outstanding mortgage']
+
+    # clause to see if inv rent should have blanket income tax applied first
+    inv_rent = df['if rented money inv']
+    if tax:
+        inv_rent = (df['if rented money w/ income tax inv'])
+    
+    total_value = sold_value + inv_rent
+    return total_value - df['est rent']            # other residence living in assumed to cost rent
+
+# apply function to generate columns for graphing
+df['1) sold house and invested, liquidated'] = df.apply(sold_initially_invested, axis=1)
+df['2) primary residence value, liquidated'] = df.apply(value_primary_residence, axis=1)
+df['3) collecting rent w/o income tax and invested, liquidated'] = df.apply(rented_out, axis=1)
+df['4) collecting rent and invested, liquidated'] = df.apply(rented_out, axis=1, tax=True)
+
+# plot columns
+df.plot(x= 'years', y= ['1) sold house and invested, liquidated','2) primary residence value, liquidated', '3) collecting rent w/o income tax and invested, liquidated','4) collecting rent and invested, liquidated'], kind='line')
+plt.title('Residential inv vs market inv')
+plt.title('Residential inv vs market inv', fontsize=14, pad=15)
+plt.ylabel('Net liquidatable assets ($)')
+plt.gca().yaxis.set_major_formatter(ticker.FuncFormatter(lambda val, pos: f"${val:,.0f}"))
+plt.legend(loc='upper left', frameon=True, shadow=True, fontsize=10)
+plt.grid(True, linestyle='--', alpha=0.6)
+
+df.head(5)
